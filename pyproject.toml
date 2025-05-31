@@ -43,6 +43,24 @@ dev = [
     "mypy>=1.0.0",
     "ruff>=0.5.5",
 ]
+# Additional LLM providers
+anthropic = [
+    "langchain-anthropic>=0.3.0",
+]
+ollama = [
+    "langchain-ollama>=0.2.0",
+]
+# All LLM providers
+all-llm = [
+    "browser-use-mcp-server[anthropic]",
+    "browser-use-mcp-server[ollama]",
+]
+# All optional dependencies
+all = [
+    "browser-use-mcp-server[test]",
+    "browser-use-mcp-server[dev]",
+    "browser-use-mcp-server[all-llm]",
+]
 
 [project.urls]
 "Homepage" = "https://github.com/cobrowser/browser-use-mcp-server"

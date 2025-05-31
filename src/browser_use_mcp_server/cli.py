@@ -60,6 +60,33 @@ def cli():
 @click.option(
     "--stdio", is_flag=True, default=False, help="Enable stdio mode with mcp-proxy"
 )
+@click.option(
+    "--llm-provider",
+    default="openai",
+    type=click.Choice(["openai", "anthropic", "ollama"], case_sensitive=False),
+    help="LLM provider to use (openai, anthropic, ollama)",
+)
+@click.option(
+    "--llm-model",
+    default=None,
+    help="LLM model name (uses provider defaults if not specified)",
+)
+@click.option(
+    "--llm-api-key",
+    default=None,
+    help="API key for the LLM provider (uses environment variables if not specified)",
+)
+@click.option(
+    "--llm-base-url",
+    default=None,
+    help="Base URL for the LLM provider (for Ollama, defaults to http://localhost:11434)",
+)
+@click.option(
+    "--llm-temperature",
+    default=0.0,
+    type=float,
+    help="Temperature setting for the LLM model",
+)
 def run(
     subcommand,
     port,
@@ -70,10 +97,20 @@ def run(
     locale,
     task_expiry_minutes,
     stdio,
+    llm_provider,
+    llm_model,
+    llm_api_key,
+    llm_base_url,
+    llm_temperature,
 ):
     """Run the browser-use MCP server.
 
     SUBCOMMAND: should be 'server'
+
+    LLM Provider Support:
+    - OpenAI: Requires OPENAI_API_KEY environment variable or --llm-api-key
+    - Anthropic: Requires ANTHROPIC_API_KEY environment variable or --llm-api-key
+    - Ollama: Requires local Ollama server running (default: http://localhost:11434)
     """
     if subcommand != "server":
         log_error(f"Unknown subcommand: {subcommand}. Only 'server' is supported.")
@@ -103,6 +140,20 @@ def run(
 
         if stdio:
             new_argv.append("--stdio")
+
+        # Add LLM provider options
+        new_argv.extend(["--llm-provider", llm_provider])
+
+        if llm_model:
+            new_argv.extend(["--llm-model", llm_model])
+
+        if llm_api_key:
+            new_argv.extend(["--llm-api-key", llm_api_key])
+
+        if llm_base_url:
+            new_argv.extend(["--llm-base-url", llm_base_url])
+
+        new_argv.extend(["--llm-temperature", str(llm_temperature)])
 
         # Replace sys.argv temporarily
         sys.argv = new_argv

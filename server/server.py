@@ -16,6 +16,45 @@ import logging
 import os
 import sys
 
+# Early stdio mode detection and configuration
+# This must happen before any other imports that might log to stdout
+if '--stdio' in sys.argv:
+    # Immediately redirect stdout to prevent any logging interference
+    class EarlyStdoutFilter:
+        def __init__(self):
+            self.stderr = sys.stderr
+            self.original_stdout = sys.stdout
+
+        def write(self, text):
+            stripped = text.strip()
+            if stripped:
+                # If it looks like JSON (MCP protocol), let it through
+                if stripped.startswith('{') and stripped.endswith('}'):
+                    self.original_stdout.write(text)
+                    self.original_stdout.flush()
+                else:
+                    # Redirect everything else to stderr
+                    self.stderr.write(f"[EARLY-LOG] {text}")
+                    self.stderr.flush()
+            else:
+                self.original_stdout.write(text)
+                self.original_stdout.flush()
+
+        def flush(self):
+            self.original_stdout.flush()
+            self.stderr.flush()
+
+    # Replace stdout immediately
+    sys.stdout = EarlyStdoutFilter()
+
+    # Also configure basic logging to stderr immediately
+    logging.basicConfig(
+        level=logging.ERROR,
+        format='%(levelname)s:%(name)s:%(message)s',
+        stream=sys.stderr,
+        force=True
+    )
+
 # Set up SSE transport
 import threading
 import time
@@ -36,7 +75,7 @@ from browser_use.browser.context import BrowserContext, BrowserContextConfig
 from dotenv import load_dotenv
 from langchain_core.language_models import BaseLanguageModel
 
-# LLM provider
+# LLM providers
 from langchain_openai import ChatOpenAI
 
 # MCP server components
@@ -46,29 +85,124 @@ from pythonjsonlogger import jsonlogger
 from starlette.applications import Starlette
 from starlette.routing import Mount, Route
 
-# Configure logging
-logger = logging.getLogger()
-logger.handlers = []  # Remove any existing handlers
-handler = logging.StreamHandler(sys.stderr)
-formatter = jsonlogger.JsonFormatter(
-    '{"time":"%(asctime)s","level":"%(levelname)s","name":"%(name)s","message":"%(message)s"}'
-)
-handler.setFormatter(formatter)
-logger.addHandler(handler)
-logger.setLevel(logging.INFO)
-
-# Ensure uvicorn also logs to stderr in JSON format
-uvicorn_logger = logging.getLogger("uvicorn")
-uvicorn_logger.handlers = []
-uvicorn_logger.addHandler(handler)
-
-# Ensure all other loggers use the same format
-logging.getLogger("browser_use").addHandler(handler)
-logging.getLogger("playwright").addHandler(handler)
-logging.getLogger("mcp").addHandler(handler)
-
 # Load environment variables
 load_dotenv()
+
+
+def configure_logging_for_stdio():
+    """
+    Configure logging specifically for MCP stdio mode.
+
+    This ensures that ALL logging output goes to stderr and nothing
+    interferes with the JSON protocol on stdout.
+    """
+    # Suppress all stdout output from third-party libraries
+    import warnings
+    warnings.filterwarnings("ignore")
+
+    # Completely disable all existing loggers first
+    logging.getLogger().handlers.clear()
+
+    # Configure root logger to use stderr only with minimal output
+    root_logger = logging.getLogger()
+    root_logger.handlers = []
+
+    # Create stderr handler with minimal formatting for stdio mode
+    stderr_handler = logging.StreamHandler(sys.stderr)
+    # Use simple formatter for stdio mode to reduce noise
+    simple_formatter = logging.Formatter('%(levelname)s:%(name)s:%(message)s')
+    stderr_handler.setFormatter(simple_formatter)
+    root_logger.addHandler(stderr_handler)
+    root_logger.setLevel(logging.ERROR)  # Only show errors in stdio mode
+
+    # Aggressively configure all known problematic loggers
+    loggers_to_silence = [
+        "browser_use",
+        "playwright",
+        "mcp",
+        "uvicorn",
+        "uvicorn.access",
+        "uvicorn.error",
+        "httpx",
+        "httpcore",
+        "asyncio",
+        "langchain",
+        "langchain_openai",
+        "langchain_anthropic",
+        "langchain_ollama",
+        "openai",
+        "anthropic",
+        "ollama",
+        "root",
+        "",  # Root logger
+    ]
+
+    for logger_name in loggers_to_silence:
+        logger = logging.getLogger(logger_name)
+        logger.handlers = []
+        logger.addHandler(stderr_handler)
+        logger.setLevel(logging.ERROR)  # Only errors
+        logger.propagate = False
+
+    # Smart stdout redirection that preserves MCP protocol
+    class MCPStdoutFilter:
+        def __init__(self):
+            self.stderr = sys.stderr
+            self.original_stdout = sys.stdout
+
+        def write(self, text):
+            # Check if this looks like MCP protocol JSON
+            stripped = text.strip()
+            if stripped:
+                # If it starts with { and ends with }, it might be MCP JSON
+                if stripped.startswith('{') and stripped.endswith('}'):
+                    # Let MCP protocol messages through to stdout
+                    self.original_stdout.write(text)
+                    self.original_stdout.flush()
+                else:
+                    # Redirect everything else to stderr with a prefix
+                    self.stderr.write(f"[LOG] {text}")
+                    self.stderr.flush()
+            else:
+                # Empty lines go to original stdout
+                self.original_stdout.write(text)
+                self.original_stdout.flush()
+
+        def flush(self):
+            self.original_stdout.flush()
+            self.stderr.flush()
+
+    # Replace stdout with our smart filter
+    sys.stdout = MCPStdoutFilter()
+
+
+# Check if we're in stdio mode and configure logging immediately
+if '--stdio' in sys.argv:
+    configure_logging_for_stdio()
+else:
+    # Configure logging normally for non-stdio mode
+    logger = logging.getLogger()
+    logger.handlers = []  # Remove any existing handlers
+    handler = logging.StreamHandler(sys.stderr)
+    formatter = jsonlogger.JsonFormatter(
+        '{"time":"%(asctime)s","level":"%(levelname)s","name":"%(name)s","message":"%(message)s"}'
+    )
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+    logger.setLevel(logging.INFO)
+
+    # Ensure uvicorn also logs to stderr in JSON format
+    uvicorn_logger = logging.getLogger("uvicorn")
+    uvicorn_logger.handlers = []
+    uvicorn_logger.addHandler(handler)
+
+    # Ensure all other loggers use the same format
+    logging.getLogger("browser_use").addHandler(handler)
+    logging.getLogger("playwright").addHandler(handler)
+    logging.getLogger("mcp").addHandler(handler)
+
+# Get logger instance for use throughout the module
+logger = logging.getLogger(__name__)
 
 
 def parse_bool_env(env_var: str, default: bool = False) -> bool:
@@ -129,6 +263,87 @@ def init_configuration() -> Dict[str, Any]:
     }
 
     return config
+
+
+def create_llm(
+    provider: str = "openai",
+    model: Optional[str] = None,
+    api_key: Optional[str] = None,
+    base_url: Optional[str] = None,
+    temperature: float = 0.0,
+) -> BaseLanguageModel:
+    """
+    Create an LLM instance based on the specified provider.
+
+    Args:
+        provider: LLM provider ("openai", "anthropic", "ollama")
+        model: Model name (provider-specific defaults if not specified)
+        api_key: API key for the provider (uses environment variables if not specified)
+        base_url: Base URL for the provider (for Ollama, defaults to http://localhost:11434)
+        temperature: Temperature setting for the model
+
+    Returns:
+        Configured LLM instance
+
+    Raises:
+        ValueError: If provider is not supported or required dependencies are missing
+        ImportError: If required packages are not installed
+    """
+    provider = provider.lower()
+
+    if provider == "openai":
+        # Use existing OpenAI implementation
+        model = model or "gpt-4o"
+        api_key = api_key or os.environ.get("OPENAI_API_KEY")
+        if not api_key:
+            raise ValueError("OpenAI API key is required. Set OPENAI_API_KEY environment variable or pass api_key parameter.")
+
+        return ChatOpenAI(
+            model=model,
+            temperature=temperature,
+            api_key=api_key
+        )
+
+    elif provider == "anthropic":
+        try:
+            from langchain_anthropic import ChatAnthropic
+        except ImportError:
+            raise ImportError(
+                "langchain-anthropic package is required for Anthropic models. "
+                "Install it with: pip install langchain-anthropic"
+            )
+
+        model = model or "claude-3-5-sonnet-20241022"
+        api_key = api_key or os.environ.get("ANTHROPIC_API_KEY")
+        if not api_key:
+            raise ValueError("Anthropic API key is required. Set ANTHROPIC_API_KEY environment variable or pass api_key parameter.")
+
+        return ChatAnthropic(
+            model=model,
+            temperature=temperature,
+            api_key=api_key
+        )
+
+    elif provider == "ollama":
+        try:
+            from langchain_ollama import ChatOllama
+        except ImportError:
+            raise ImportError(
+                "langchain-ollama package is required for Ollama models. "
+                "Install it with: pip install langchain-ollama"
+            )
+
+        model = model or "llama3.1"
+        base_url = base_url or os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
+
+        return ChatOllama(
+            model=model,
+            temperature=temperature,
+            base_url=base_url
+        )
+
+    else:
+        raise ValueError(f"Unsupported LLM provider: {provider}. Supported providers: openai, anthropic, ollama")
 
 
 # Initialize configuration
@@ -758,6 +973,33 @@ def create_mcp_server(
     default=False,
     help="Enable stdio mode. If specified, enables proxy mode.",
 )
+@click.option(
+    "--llm-provider",
+    default="openai",
+    type=click.Choice(["openai", "anthropic", "ollama"], case_sensitive=False),
+    help="LLM provider to use (openai, anthropic, ollama)",
+)
+@click.option(
+    "--llm-model",
+    default=None,
+    help="LLM model name (uses provider defaults if not specified)",
+)
+@click.option(
+    "--llm-api-key",
+    default=None,
+    help="API key for the LLM provider (uses environment variables if not specified)",
+)
+@click.option(
+    "--llm-base-url",
+    default=None,
+    help="Base URL for the LLM provider (for Ollama, defaults to http://localhost:11434)",
+)
+@click.option(
+    "--llm-temperature",
+    default=0.0,
+    type=float,
+    help="Temperature setting for the LLM model",
+)
 def main(
     port: int,
     proxy_port: Optional[int],
@@ -767,6 +1009,11 @@ def main(
     locale: str,
     task_expiry_minutes: int,
     stdio: bool,
+    llm_provider: str,
+    llm_model: Optional[str],
+    llm_api_key: Optional[str],
+    llm_base_url: Optional[str],
+    llm_temperature: float,
 ) -> int:
     """
     Run the browser-use MCP server.
@@ -778,6 +1025,11 @@ def main(
     1. Direct SSE mode (default): Just runs the SSE server
     2. Proxy mode (enabled by --stdio or --proxy-port): Runs both SSE server and mcp-proxy
 
+    LLM Provider Support:
+    - OpenAI: Requires OPENAI_API_KEY environment variable or --llm-api-key
+    - Anthropic: Requires ANTHROPIC_API_KEY environment variable or --llm-api-key
+    - Ollama: Requires local Ollama server running (default: http://localhost:11434)
+
     Args:
         port: Port to listen on for SSE
         proxy_port: Port for the proxy to listen on. If specified, enables proxy mode.
@@ -787,6 +1039,11 @@ def main(
         locale: Browser locale
         task_expiry_minutes: Minutes after which tasks are considered expired
         stdio: Enable stdio mode. If specified, enables proxy mode.
+        llm_provider: LLM provider to use
+        llm_model: LLM model name
+        llm_api_key: API key for the LLM provider
+        llm_base_url: Base URL for the LLM provider
+        llm_temperature: Temperature setting for the LLM model
 
     Returns:
         Exit code (0 for success)
@@ -800,8 +1057,21 @@ def main(
             "No Chrome path specified, letting Playwright use its default browser"
         )
 
-    # Initialize LLM
-    llm = ChatOpenAI(model="gpt-4o", temperature=0.0)
+    # Initialize LLM with user-specified provider and options
+    try:
+        llm = create_llm(
+            provider=llm_provider,
+            model=llm_model,
+            api_key=llm_api_key,
+            base_url=llm_base_url,
+            temperature=llm_temperature,
+        )
+        logger.info(f"Initialized LLM provider: {llm_provider}")
+        if llm_model:
+            logger.info(f"Using model: {llm_model}")
+    except (ValueError, ImportError) as e:
+        logger.error(f"Failed to initialize LLM: {str(e)}")
+        return 1
 
     # Create MCP server
     app = create_mcp_server(
@@ -926,9 +1196,15 @@ def main(
             # Using trusted command arguments from CLI parameters
             with subprocess.Popen(proxy_cmd) as proxy_process:  # nosec
                 proxy_process.wait()
+        except FileNotFoundError:
+            logger.error("mcp-proxy not found. Please install it with: uv tool install mcp-proxy")
+            logger.error("Or ensure it's in your PATH if installed differently.")
+            logger.error("For more information, see: https://github.com/sparfenyuk/mcp-proxy")
+            return 1
         except Exception as e:
             logger.error(f"Error starting mcp-proxy: {str(e)}")
             logger.error(f"Command was: {' '.join(proxy_cmd)}")
+            logger.error("Make sure mcp-proxy is installed and accessible in your PATH.")
             return 1
     else:
         logger.info(f"Running in direct SSE mode on port {port}")

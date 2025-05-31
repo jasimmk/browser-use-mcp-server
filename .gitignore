@@ -4,3 +4,4 @@
 .env
 *.egg-info
 dist
+.cursor/mcp.json
